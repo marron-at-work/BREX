@@ -30,6 +30,7 @@ namespace brex
         virtual bool needsParens() const { return false; }
         virtual bool needsSequenceParens() const { return false; }
         virtual std::u8string toBSQONFormat() const = 0;
+        virtual json jemit() const = 0;
 
         static RegexOpt* jparse(json j);
     };
@@ -66,6 +67,17 @@ namespace brex
             const bool isunicode = j["isunicode"].get<bool>();
 
             return new LiteralOpt(codes, isunicode);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["charcodes"] = json::array();
+            for(const auto& code : this->codes) {
+                j["charcodes"].push_back(code);
+            }
+            j["isunicode"] = this->isunicode;
+            return j;
         }
     };
 
@@ -121,6 +133,21 @@ namespace brex
 
             return new CharRangeOpt(compliment, ranges, isunicode);
         }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["compliment"] = this->compliment;
+            j["range"] = json::array();
+            for(const auto& r : this->ranges) {
+                json range_obj;
+                range_obj["lb"] = r.low;
+                range_obj["ub"] = r.high;
+                j["range"].push_back(range_obj);
+            }
+            j["isunicode"] = this->isunicode;
+            return j;
+        }
     };
 
     class CharClassDotOpt : public RegexOpt
@@ -137,6 +164,11 @@ namespace brex
         static CharClassDotOpt* jparse(json j)
         {
             return new CharClassDotOpt();
+        }
+
+        virtual json jemit() const override final
+        {
+            return json{};
         }
     };
 
@@ -160,6 +192,13 @@ namespace brex
 
             return new NamedRegexOpt(rname);
         }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["rname"] = this->rname;
+            return j;
+        }
     };
 
     class EnvRegexOpt : public RegexOpt
@@ -180,6 +219,13 @@ namespace brex
             const std::string ename = j["ename"].get<std::string>();
 
             return new EnvRegexOpt(ename);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["ename"] = this->ename;
+            return j;
         }
     };
 
@@ -207,6 +253,13 @@ namespace brex
             auto repeat = RegexOpt::jparse(j["repeat"]);
             return new StarRepeatOpt(repeat);
         }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["repeat"] = this->repeat->jemit();
+            return j;
+        }
     };
 
     class PlusRepeatOpt : public RegexOpt
@@ -232,6 +285,13 @@ namespace brex
         {
             auto repeat = RegexOpt::jparse(j["repeat"]);
             return new PlusRepeatOpt(repeat);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["repeat"] = this->repeat->jemit();
+            return j;
         }
     };
 
@@ -283,6 +343,19 @@ namespace brex
 
             return new RangeRepeatOpt(low, high, repeat);
         }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["repeat"] = this->repeat->jemit();
+            j["low"] = this->low;
+            if (this->high == UINT16_MAX) {
+                j["high"] = nullptr;
+            } else {
+                j["high"] = this->high;
+            }
+            return j;
+        }
     };
 
     class OptionalOpt : public RegexOpt
@@ -308,6 +381,13 @@ namespace brex
         {
             auto opt = RegexOpt::jparse(j["opt"]);
             return new OptionalOpt(opt);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["opt"] = this->opt->jemit();
+            return j;
         }
     };
 
@@ -350,6 +430,16 @@ namespace brex
 
             return new AnyOfOpt(opts);
         }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["opts"] = json::array();
+            for(const auto& opt_ptr : this->opts) {
+                j["opts"].push_back(opt_ptr->jemit());
+            }
+            return j;
+        }
     };
 
     class SequenceOpt : public RegexOpt
@@ -385,6 +475,16 @@ namespace brex
             });
 
             return new SequenceOpt(regexs);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["regexs"] = json::array();
+            for(const auto& regex_ptr : this->regexs) {
+                j["regexs"].push_back(regex_ptr->jemit());
+            }
+            return j;
         }
     };
 
@@ -443,6 +543,16 @@ namespace brex
             auto opt = RegexOpt::jparse(j["opt"]);
             return RegexToplevelEntry(isNegated, isFrontCheck, isBackCheck, opt);
         }
+
+        json jemit() const
+        {
+            json j;
+            j["isNegated"] = this->isNegated;
+            j["isFrontCheck"] = this->isFrontCheck;
+            j["isBackCheck"] = this->isBackCheck;
+            j["opt"] = this->opt->jemit();
+            return j;
+        }
     };
 
     enum class RegexComponentTag
@@ -460,6 +570,7 @@ namespace brex
         virtual ~RegexComponent() = default;
 
         virtual std::u8string toBSQONFormat() const = 0;
+        virtual json jemit() const = 0;
 
         static RegexComponent* jparse(json j);
 
@@ -492,6 +603,13 @@ namespace brex
         {
             auto entry = RegexToplevelEntry::jparse(j["entry"]);
             return new RegexSingleComponent(entry);
+        }
+
+        virtual json jemit() const override final
+        {
+            json j;
+            j["entry"] = this->entry.jemit();
+            return j;
         }
 
         virtual bool isContainsable() const override final
@@ -564,6 +682,16 @@ namespace brex
             return new RegexAllOfComponent(musts);
         }
 
+        virtual json jemit() const override final
+        {
+            json j;
+            j["musts"] = json::array();
+            for(const auto& must_entry : this->musts) {
+                j["musts"].push_back(must_entry.jemit());
+            }
+            return j;
+        }
+
         virtual bool isContainsable() const override final
         {
             return false;
@@ -630,6 +758,30 @@ namespace brex
             auto re = RegexComponent::jparse(j["re"]);
 
             return new Regex(rtag, ctag, preanchor, postanchor, re);
+        }
+
+        json jemit() const
+        {
+            json j;
+            j["isPath"] = (this->rtag == RegexKindTag::Path);
+            j["isChar"] = (this->ctag == RegexCharInfoTag::Unicode);
+
+            if (this->preanchor != nullptr) {
+                j["preanchor"] = this->preanchor->jemit();
+            }
+            else {
+                j["preanchor"] = json::value_t::null;
+            }
+
+            if (this->postanchor != nullptr) {
+                j["postanchor"] = this->postanchor->jemit();
+            }
+            else {
+                j["postanchor"] = json::value_t::null;
+            }
+
+            j["re"] = this->re->jemit();
+            return j;
         }
 
         std::u8string toBSQONFormat() const
