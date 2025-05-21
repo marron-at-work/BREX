@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm> // For std::transform, std::any_of, std::all_of
+#include <cstdint>   // For UINT16_MAX
 #include "../common.h"
 
 namespace brex
@@ -30,8 +32,9 @@ namespace brex
         virtual bool needsParens() const { return false; }
         virtual bool needsSequenceParens() const { return false; }
         virtual std::u8string toBSQONFormat() const = 0;
+        virtual void emitJSON(json& j) const = 0;
 
-        static RegexOpt* jparse(json j);
+        static RegexOpt* jparse(json j); // Declaration only
     };
 
     class LiteralOpt : public RegexOpt
@@ -43,6 +46,14 @@ namespace brex
         LiteralOpt(std::vector<RegexChar> codes, bool isunicode) : RegexOpt(RegexOptTag::Literal), codes(codes), isunicode(isunicode) {;}
         virtual ~LiteralOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "LiteralOpt";
+            j["charcodes"] = json::array();
+            for(const auto& code : this->codes) {
+                j["charcodes"].push_back(code);
+            }
+            j["isunicode"] = this->isunicode;
+        }
         virtual std::u8string toBSQONFormat() const override final
         {
             if(this->isunicode) {
@@ -55,11 +66,16 @@ namespace brex
             }
         }
 
-        static LiteralOpt* jparse(json j)
+        static LiteralOpt* jparse(json j) // Called from RegexOpt::jparse, j is already validated to be an object with "tag"
         {
+            // "charcodes" should be an array, "isunicode" a boolean
+            if(!j.contains("charcodes") || !j["charcodes"].is_array()) BREX_ABORT("LiteralOpt missing or invalid 'charcodes'");
+            if(!j.contains("isunicode") || !j["isunicode"].is_boolean()) BREX_ABORT("LiteralOpt missing or invalid 'isunicode'");
+
             std::vector<RegexChar> codes;
             auto jcodes = j["charcodes"];
             std::transform(jcodes.cbegin(), jcodes.cend(), std::back_inserter(codes), [](const json& rv) {
+                if(!rv.is_number_integer()) BREX_ABORT("charcode element is not an integer");
                 return rv.get<RegexChar>();
             });
 
@@ -79,6 +95,18 @@ namespace brex
         CharRangeOpt(bool compliment, std::vector<SingleCharRange> ranges, bool isunicode) : RegexOpt(RegexOptTag::CharRange), compliment(compliment), ranges(ranges), isunicode(isunicode) {;}
         virtual ~CharRangeOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "CharRangeOpt";
+            j["compliment"] = this->compliment;
+            j["isunicode"] = this->isunicode;
+            j["range"] = json::array();
+            for(const auto& scr : this->ranges) {
+                json range_obj;
+                range_obj["lb"] = scr.low;
+                range_obj["ub"] = scr.high;
+                j["range"].push_back(range_obj);
+            }
+        }
         virtual std::u8string toBSQONFormat() const override final
         {
             std::u8string rngs = u8"[";
@@ -106,19 +134,22 @@ namespace brex
 
         static CharRangeOpt* jparse(json j)
         {
-            const bool compliment = j["compliment"].get<bool>();
+            if(!j.contains("compliment") || !j["compliment"].is_boolean()) BREX_ABORT("CharRangeOpt missing or invalid 'compliment'");
+            if(!j.contains("isunicode") || !j["isunicode"].is_boolean()) BREX_ABORT("CharRangeOpt missing or invalid 'isunicode'");
+            if(!j.contains("range") || !j["range"].is_array()) BREX_ABORT("CharRangeOpt missing or invalid 'range'");
 
+            const bool compliment = j["compliment"].get<bool>();
             std::vector<SingleCharRange> ranges;
             auto jranges = j["range"];
             std::transform(jranges.cbegin(), jranges.cend(), std::back_inserter(ranges), [](const json& rv) {
+                if(!rv.is_object()) BREX_ABORT("CharRangeOpt range element is not an object");
+                if(!rv.contains("lb") || !rv["lb"].is_number_integer()) BREX_ABORT("CharRangeOpt range element missing or invalid 'lb'");
+                if(!rv.contains("ub") || !rv["ub"].is_number_integer()) BREX_ABORT("CharRangeOpt range element missing or invalid 'ub'");
                 auto lb = rv["lb"].get<RegexChar>();
                 auto ub = rv["ub"].get<RegexChar>();
-
                 return SingleCharRange{lb, ub};
             });
-
             const bool isunicode = j["isunicode"].get<bool>();
-
             return new CharRangeOpt(compliment, ranges, isunicode);
         }
     };
@@ -129,13 +160,17 @@ namespace brex
         CharClassDotOpt() : RegexOpt(RegexOptTag::CharClassDot) {;}
         virtual ~CharClassDotOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "CharClassDotOpt";
+        }
         virtual std::u8string toBSQONFormat() const override final
         {
             return std::u8string{u8'.'};
         }
 
-        static CharClassDotOpt* jparse(json j)
+        static CharClassDotOpt* jparse(json j) // j is validated by RegexOpt::jparse
         {
+            (void)j; // j is not used for CharClassDotOpt, but signature must match
             return new CharClassDotOpt();
         }
     };
@@ -149,6 +184,10 @@ namespace brex
         NamedRegexOpt(const std::string& rname) : RegexOpt(RegexOptTag::NamedRegex), rname(rname) {;}
         virtual ~NamedRegexOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "NamedRegexOpt";
+            j["rname"] = this->rname;
+        }
         virtual std::u8string toBSQONFormat() const override final
         {
             return u8'{' + std::u8string(this->rname.cbegin(), this->rname.cend()) + u8'}';
@@ -156,8 +195,8 @@ namespace brex
 
         static NamedRegexOpt* jparse(json j)
         {
+            if(!j.contains("rname") || !j["rname"].is_string()) BREX_ABORT("NamedRegexOpt missing or invalid 'rname'");
             const std::string rname = j["rname"].get<std::string>();
-
             return new NamedRegexOpt(rname);
         }
     };
@@ -170,6 +209,10 @@ namespace brex
         EnvRegexOpt(const std::string& ename) : RegexOpt(RegexOptTag::EnvRegex), ename(ename) {;}
         virtual ~EnvRegexOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "EnvRegexOpt";
+            j["ename"] = this->ename;
+        }
         virtual std::u8string toBSQONFormat() const override final
         {
             return u8'{' + std::u8string(this->ename.cbegin(), this->ename.cend()) + u8'}';
@@ -177,8 +220,8 @@ namespace brex
 
         static EnvRegexOpt* jparse(json j)
         {
+            if(!j.contains("ename") || !j["ename"].is_string()) BREX_ABORT("EnvRegexOpt missing or invalid 'ename'");
             const std::string ename = j["ename"].get<std::string>();
-
             return new EnvRegexOpt(ename);
         }
     };
@@ -191,6 +234,12 @@ namespace brex
         StarRepeatOpt(const RegexOpt* repeat) : RegexOpt(RegexOptTag::StarRepeat), repeat(repeat) {;}
         virtual ~StarRepeatOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "StarRepeatOpt";
+            json repeat_val;
+            this->repeat->emitJSON(repeat_val);
+            j["repeat"] = repeat_val;
+        }
         virtual bool needsParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
         {
@@ -204,6 +253,7 @@ namespace brex
 
         static StarRepeatOpt* jparse(json j)
         {
+            if(!j.contains("repeat") || !j["repeat"].is_object()) BREX_ABORT("StarRepeatOpt missing or invalid 'repeat' field");
             auto repeat = RegexOpt::jparse(j["repeat"]);
             return new StarRepeatOpt(repeat);
         }
@@ -217,6 +267,12 @@ namespace brex
         PlusRepeatOpt(const RegexOpt* repeat) : RegexOpt(RegexOptTag::PlusRepeat), repeat(repeat) {;}
         virtual ~PlusRepeatOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "PlusRepeatOpt";
+            json repeat_val;
+            this->repeat->emitJSON(repeat_val);
+            j["repeat"] = repeat_val;
+        }
         virtual bool needsParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
         {
@@ -230,6 +286,7 @@ namespace brex
 
         static PlusRepeatOpt* jparse(json j)
         {
+            if(!j.contains("repeat") || !j["repeat"].is_object()) BREX_ABORT("PlusRepeatOpt missing or invalid 'repeat' field");
             auto repeat = RegexOpt::jparse(j["repeat"]);
             return new PlusRepeatOpt(repeat);
         }
@@ -245,6 +302,19 @@ namespace brex
         RangeRepeatOpt(uint16_t low, uint16_t high, const RegexOpt* repeat) : RegexOpt(RegexOptTag::RangeRepeat), repeat(repeat), low(low), high(high) {;}
         virtual ~RangeRepeatOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "RangeRepeatOpt";
+            j["low"] = this->low;
+            if (this->high != UINT16_MAX) {
+                j["high"] = this->high;
+            }
+            else {
+                j["high"] = nullptr; // Or json::value_t::null
+            }
+            json repeat_val;
+            this->repeat->emitJSON(repeat_val);
+            j["repeat"] = repeat_val;
+        }
         virtual bool needsParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
         {
@@ -277,10 +347,21 @@ namespace brex
 
         static RangeRepeatOpt* jparse(json j)
         {
+            if(!j.contains("repeat") || !j["repeat"].is_object()) BREX_ABORT("RangeRepeatOpt missing or invalid 'repeat' field");
+            if(!j.contains("low") || !j["low"].is_number_integer()) BREX_ABORT("RangeRepeatOpt missing or invalid 'low' field");
+            
             auto repeat = RegexOpt::jparse(j["repeat"]);
             auto low = j["low"].get<uint16_t>();
-            auto high = (!j.contains("high") || j["high"].is_null()) ? UINT16_MAX : j["high"].get<uint16_t>();
-
+            uint16_t high = UINT16_MAX;
+            if (j.contains("high")) {
+                if (j["high"].is_null()) {
+                    high = UINT16_MAX;
+                } else if (j["high"].is_number_integer()) {
+                    high = j["high"].get<uint16_t>();
+                } else {
+                    BREX_ABORT("RangeRepeatOpt 'high' field is not an integer or null");
+                }
+            }
             return new RangeRepeatOpt(low, high, repeat);
         }
     };
@@ -293,6 +374,12 @@ namespace brex
         OptionalOpt(const RegexOpt* opt) : RegexOpt(RegexOptTag::Optional), opt(opt) {;}
         virtual ~OptionalOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "OptionalOpt";
+            json opt_val;
+            this->opt->emitJSON(opt_val);
+            j["opt"] = opt_val;
+        }
         virtual bool needsParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
         {
@@ -306,6 +393,7 @@ namespace brex
 
         static OptionalOpt* jparse(json j)
         {
+            if(!j.contains("opt") || !j["opt"].is_object()) BREX_ABORT("OptionalOpt missing or invalid 'opt' field");
             auto opt = RegexOpt::jparse(j["opt"]);
             return new OptionalOpt(opt);
         }
@@ -319,6 +407,15 @@ namespace brex
         AnyOfOpt(std::vector<const RegexOpt*> opts) : RegexOpt(RegexOptTag::AnyOf), opts(opts) {;}
         virtual ~AnyOfOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "AnyOfOpt";
+            j["opts"] = json::array();
+            for(const auto* opt_ptr : this->opts) {
+                json opt_val;
+                opt_ptr->emitJSON(opt_val);
+                j["opts"].push_back(opt_val);
+            }
+        }
         virtual bool needsParens() const override final { return true; }
         virtual bool needsSequenceParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
@@ -342,12 +439,13 @@ namespace brex
 
         static AnyOfOpt* jparse(json j)
         {
+            if(!j.contains("opts") || !j["opts"].is_array()) BREX_ABORT("AnyOfOpt missing or invalid 'opts' field");
             std::vector<const RegexOpt*> opts;
             auto jopts = j["opts"];
             std::transform(jopts.cbegin(), jopts.cend(), std::back_inserter(opts), [](json arg) {
+                if(!arg.is_object()) BREX_ABORT("AnyOfOpt 'opts' element is not an object");
                 return RegexOpt::jparse(arg);
             });
-
             return new AnyOfOpt(opts);
         }
     };
@@ -360,6 +458,15 @@ namespace brex
         SequenceOpt(std::vector<const RegexOpt*> regexs) : RegexOpt(RegexOptTag::Sequence), regexs(regexs) {;}
         virtual ~SequenceOpt() = default;
 
+        virtual void emitJSON(json& j) const override final {
+            j["tag"] = "SequenceOpt";
+            j["regexs"] = json::array();
+            for(const auto* regex_ptr : this->regexs) {
+                json regex_val;
+                regex_ptr->emitJSON(regex_val);
+                j["regexs"].push_back(regex_val);
+            }
+        }
         virtual bool needsParens() const override final { return true; }
         virtual std::u8string toBSQONFormat() const override final
         {
@@ -378,12 +485,13 @@ namespace brex
 
         static SequenceOpt* jparse(json j)
         {
+            if(!j.contains("regexs") || !j["regexs"].is_array()) BREX_ABORT("SequenceOpt missing or invalid 'regexs' field");
             std::vector<const RegexOpt*> regexs;
             auto jregexs = j["regexs"];
             std::transform(jregexs.cbegin(), jregexs.cend(), std::back_inserter(regexs), [](json arg) {
+                if(!arg.is_object()) BREX_ABORT("SequenceOpt 'regexs' element is not an object");
                 return RegexOpt::jparse(arg);
             });
-
             return new SequenceOpt(regexs);
         }
     };
@@ -407,6 +515,7 @@ namespace brex
         RegexToplevelEntry& operator=(const RegexToplevelEntry& other) = default;
         RegexToplevelEntry& operator=(RegexToplevelEntry&& other) = default;
 
+        void emitJSON(json& j) const;
         std::u8string toBSQONFormat() const
         {
             std::u8string fstr;
@@ -436,11 +545,21 @@ namespace brex
 
         static RegexToplevelEntry jparse(json j)
         {
-            bool isNegated = j["isNegated"].get<bool>();
-            bool isFrontCheck = j["isFrontCheck"].get<bool>();
-            bool isBackCheck = j["isBackCheck"].get<bool>();
+            bool isNegated = j.value("isNegated", false);
+            bool isFrontCheck = j.value("isFrontCheck", false);
+            bool isBackCheck = j.value("isBackCheck", false);
 
-            auto opt = RegexOpt::jparse(j["opt"]);
+            json opt_payload;
+            if (j.contains("opt") && j["opt"].is_object()) {
+                opt_payload = j["opt"];
+            } else if (j.contains("tag")) { // If j itself has a "tag", it's the opt payload
+                opt_payload = j;
+            } else {
+                 // This case should ideally be caught by the structure of the tests or higher-level parsing if "re" must be valid.
+                 // For robustness, if neither "opt" nor "tag" (implying j is the opt) is found, it's an error.
+                 BREX_ABORT("ToplevelEntry JSON has no 'opt' field and is not a direct RegexOpt object with a 'tag'");
+            }
+            auto opt = RegexOpt::jparse(opt_payload);
             return RegexToplevelEntry(isNegated, isFrontCheck, isBackCheck, opt);
         }
     };
@@ -460,6 +579,7 @@ namespace brex
         virtual ~RegexComponent() = default;
 
         virtual std::u8string toBSQONFormat() const = 0;
+        virtual void emitJSON(json& j) const = 0;
 
         static RegexComponent* jparse(json j);
 
@@ -483,6 +603,7 @@ namespace brex
         RegexSingleComponent(const RegexToplevelEntry& entry) : RegexComponent(RegexComponentTag::Single), entry(entry) {;}
         ~RegexSingleComponent() = default;
 
+        virtual void emitJSON(json& j) const override final;
         virtual std::u8string toBSQONFormat() const override final
         {
             return this->entry.toBSQONFormat();
@@ -490,7 +611,7 @@ namespace brex
 
         static RegexSingleComponent* jparse(json j)
         {
-            auto entry = RegexToplevelEntry::jparse(j["entry"]);
+            auto entry = RegexToplevelEntry::jparse(j); // Changed j["entry"] to j
             return new RegexSingleComponent(entry);
         }
 
@@ -538,6 +659,7 @@ namespace brex
         RegexAllOfComponent(const std::vector<RegexToplevelEntry>& musts) : RegexComponent(RegexComponentTag::AllOf), musts(musts) {;}
         virtual ~RegexAllOfComponent() = default;
 
+        virtual void emitJSON(json& j) const override final;
         std::u8string toBSQONFormat() const override final
         {
             std::u8string muststr;
@@ -552,12 +674,11 @@ namespace brex
             return muststr;
         }
 
-        static RegexAllOfComponent* jparse(json j)
+        static RegexAllOfComponent* jparse(json j_array_of_entries) // Renamed j to clarify
         {
-            auto jmusts = j["musts"];
             std::vector<RegexToplevelEntry> musts;
-
-            std::transform(jmusts.cbegin(), jmusts.cend(), std::back_inserter(musts), [](json arg) {
+            // j_array_of_entries is the array itself, not an object containing a "musts" key.
+            std::transform(j_array_of_entries.cbegin(), j_array_of_entries.cend(), std::back_inserter(musts), [](json arg) {
                 return RegexToplevelEntry::jparse(arg);
             });
 
@@ -620,16 +741,23 @@ namespace brex
         Regex(RegexKindTag rtag, RegexCharInfoTag ctag, const RegexComponent* preanchor, const RegexComponent* postanchor, const RegexComponent* re): rtag(rtag), ctag(ctag), preanchor(preanchor), postanchor(postanchor), re(re) {;}
         ~Regex() = default;
 
+        void emitJSON(json& j) const;
         static Regex* jparse(json j)
         {
-            auto rtag = (!j.contains("isPath") || j["isPath"].is_null()) ? RegexKindTag::Std : RegexKindTag::Path;
-            auto ctag = (!j.contains("isChar") || !j["isChar"].get<bool>()) ? RegexCharInfoTag::Char : RegexCharInfoTag::Unicode;
+            // If j itself is not an object, then .value calls below will fail.
+            // However, j comes from json::parse of a string like R"({ "re": ... })", so j should be an object.
+            bool isPath_val = j.value("isPath", false); 
+            RegexKindTag rtag_val = isPath_val ? RegexKindTag::Path : RegexKindTag::Std;
 
+            // isChar:true means Unicode, isChar:false (or missing) means Char.
+            bool isChar_val = j.value("isChar", false); 
+            RegexCharInfoTag ctag_val = isChar_val ? RegexCharInfoTag::Unicode : RegexCharInfoTag::Char;
+            
             auto preanchor = (!j.contains("preanchor") || j["preanchor"].is_null()) ? nullptr : RegexComponent::jparse(j["preanchor"]);
             auto postanchor = (!j.contains("postanchor") || j["postanchor"].is_null()) ? nullptr : RegexComponent::jparse(j["postanchor"]);
             auto re = RegexComponent::jparse(j["re"]);
 
-            return new Regex(rtag, ctag, preanchor, postanchor, re);
+            return new Regex(rtag_val, ctag_val, preanchor, postanchor, re);
         }
 
         std::u8string toBSQONFormat() const
